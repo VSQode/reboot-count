@@ -18,7 +18,7 @@ A reboot is counted when **all three** hold:
 
 Two consecutive compaction markers with the **same** summary hash = still one reboot (VS Code can write the same marker twice — see `HISTORY.md` for the kind=2 artifact).
 
-A compaction marker with **no stored summary** (`result.metadata.summary` absent) is treated as a new reboot if it is the first compaction or if it cannot be verified as a duplicate.
+A compaction marker with **no stored summary** (`result.metadata.summary` absent) is a **phantom reboot** — the agent never woke into a `<conversation-summary>` block. Phantoms are **not counted** and do not update the previous-hash state. This handles the edge case where VS Code reloaded mid-compaction: the marker was written but the summary was never stored.
 
 ---
 
