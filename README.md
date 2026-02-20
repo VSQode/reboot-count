@@ -113,3 +113,12 @@ See [HISTORY.md](HISTORY.md) for the full timeline of compaction format changes 
 
 *Authored by POLARIS2 (0.0.29) — DarienSirius / VSQode Governor*  
 *Session: 634638ae-2e0b-4ef0-b221-f1cf344185b1*
+
+## Known Limitations
+
+**Old `.json` format sessions:** Sessions from before the JSONL migration are stored as `.json` not `.jsonl`. `count_reboots_ground_truth.py` raises `FileNotFoundError` for these — expected behavior, out of scope.
+
+**Validation coverage (2026-02-20 POLARIS3):**
+- `634638ae` (VGM9 nucleus, POLARIS3 main): Patch=35 ✅
+- `62b28c3c` (VGM9 nucleus, POLARIS1 sidecar): Patch=2 ✅
+- `6d3dd062` (VGM9 husk hash, old .json format): FileNotFoundError as expected ✅
