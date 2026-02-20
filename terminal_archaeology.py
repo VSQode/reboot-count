@@ -102,31 +102,37 @@ def extract_file_url(msg: str) -> str:
     return path
 
 
-def is_background_call(invocation_msg: str, past_tense: str, result_details: object) -> bool:
-    """Heuristic: is this a background terminal call?"""
-    # Background terminals have pastTenseMessage like "Started background terminal"
-    if past_tense and "background" in past_tense.lower():
-        return True
-    if invocation_msg and "background" in invocation_msg.lower():
-        return True
-    # If resultDetails has an 'id' field but no 'output' field, likely background
-    if isinstance(result_details, dict):
-        if "id" in result_details and "output" not in result_details:
-            return True
-    return False
+def is_background_call(result_details: object) -> bool:
+    """
+    Heuristic: background terminal calls have NULL resultDetails.
+    Foreground calls with shell integration active have rd.input + rd.output.
+
+    ARCHITECTURAL REALITY (discovered 2026-02-20):
+    - invocationMessage.value is ALWAYS empty in JSONL (not stored)
+    - pastTenseMessage is empty for shell-integration-active calls
+    - resultDetails is only present for FOREGROUND calls with shell integration
+    - Background terminal IDs are NOT persisted in JSONL at all
+    - This means background terminals cannot be reliably detected or ID'd from JSONL
+    """
+    # If rd has input/output, it's a foreground call with shell integration
+    if isinstance(result_details, dict) and "input" in result_details:
+        return False
+    # If rd is None, could be background OR foreground without shell integration
+    # We cannot distinguish these from JSONL alone
+    return result_details is None
 
 
 def extract_terminal_id(result_details: object) -> Optional[str]:
-    """Extract terminal ID from resultDetails."""
+    """
+    Background terminal IDs are NOT stored in JSONL.
+    This function is a placeholder — it will always return None.
+    To get live terminal IDs, use hermes/pywinauto or VS Code extension API.
+    """
     if isinstance(result_details, dict):
         if "id" in result_details:
             return str(result_details["id"])
-        # Sometimes returned as the value directly
         if "terminalId" in result_details:
             return str(result_details["terminalId"])
-    # Background terminal result might be a plain string ID
-    if isinstance(result_details, str) and len(result_details) > 8:
-        return result_details
     return None
 
 
@@ -144,25 +150,14 @@ def mine_terminal_calls(requests: list) -> list[TerminalCall]:
                 continue
 
             tool_call_id = part.get("toolCallId", "")
-            inv_msg = part.get("invocationMessage", {})
-            if isinstance(inv_msg, dict):
-                inv_text = inv_msg.get("value", "")
-            else:
-                inv_text = str(inv_msg)
-
-            past = part.get("pastTenseMessage", "")
-            if isinstance(past, dict):
-                past = past.get("value", "")
-
             result_details = part.get("resultDetails")
+
+            # Command text only available via rd.input when shell integration active
             command = ""
             if isinstance(result_details, dict):
                 command = result_details.get("input", "")
-            if not command:
-                # Try to extract from invocation message
-                command = inv_text
 
-            is_bg = is_background_call(inv_text, past, result_details)
+            is_bg = is_background_call(result_details)
             term_id = extract_terminal_id(result_details)
             is_complete = part.get("isComplete", False)
 
@@ -172,7 +167,7 @@ def mine_terminal_calls(requests: list) -> list[TerminalCall]:
                 command=command[:120],
                 is_background=is_bg,
                 terminal_id=term_id,
-                past_tense_msg=past[:80] if past else "",
+                past_tense_msg="",
                 result_raw=result_details,
                 is_complete=is_complete,
             ))
@@ -180,29 +175,35 @@ def mine_terminal_calls(requests: list) -> list[TerminalCall]:
 
 
 def print_table(calls: list[TerminalCall], bg_only: bool = False):
-    filtered = [c for c in calls if not bg_only or c.is_background]
-    print(f"\n{'REQ':>4}  {'BG':>3}  {'COMPLETE':>8}  {'TERM_ID':>36}  COMMAND")
-    print("-" * 120)
-    for c in filtered:
-        bg_flag = "BG" if c.is_background else "  "
-        done_flag = "done" if c.is_complete else "open?"
-        tid = c.terminal_id or "(no id)"
-        print(f"{c.req_idx:>4}  {bg_flag}  {done_flag:>8}  {tid:>36}  {c.command[:60]}")
+    si_calls = [c for c in calls if not c.is_background]  # shell-integration-active
+    no_si_calls = [c for c in calls if c.is_background]   # null resultDetails (either bg or no-SI)
 
-    print(f"\nTotal terminal calls: {len(calls)}")
-    bg = [c for c in calls if c.is_background]
-    print(f"  Background: {len(bg)}")
-    print(f"  Foreground: {len(calls) - len(bg)}")
-    with_id = [c for c in bg if c.terminal_id]
-    print(f"  Background with recoverable ID: {len(with_id)}")
-    open_bg = [c for c in bg if not c.is_complete]
-    print(f"  Background possibly still open: {len(open_bg)}")
+    if not bg_only:
+        print(f"\n=== SHELL-INTEGRATION CALLS (command text recoverable): {len(si_calls)} ===")
+        print(f"{'REQ':>4}  {'ERR':>3}  {'COMPLETE':>8}  COMMAND")
+        print("-" * 100)
+        for c in si_calls[-20:]:  # last 20 most recent
+            rd = c.result_raw
+            is_err = rd.get("isError", False) if isinstance(rd, dict) else False
+            err_flag = "ERR" if is_err else "   "
+            done_flag = "done" if c.is_complete else "open?"
+            print(f"{c.req_idx:>4}  {err_flag}  {done_flag:>8}  {c.command[:80]}")
+
+    print(f"\n=== ARCHAEOLOGICAL SUMMARY ===")
+    print(f"Total terminal calls:              {len(calls)}")
+    print(f"With shell integration (SI active): {len(si_calls)}")
+    print(f"Without SI (bg or no-SI):          {len(no_si_calls)}")
+    print(f"")
+    print(f"LIMITATION: Background terminal IDs are NOT stored in JSONL.")
+    print(f"  IDs are only in the agent's working memory during the request.")
+    print(f"  To enumerate LIVE open terminals, use hermes + pywinauto or VS Code API.")
+    print(f"  To recover IDs from this session, VS Code shell integration must have been active.")
 
 
 def print_ids_only(calls: list[TerminalCall]):
-    """Emit just the terminal IDs for piping."""
+    """Emit just the terminal IDs for piping — only available for SI-active foreground calls."""
     for c in calls:
-        if c.is_background and c.terminal_id:
+        if c.terminal_id:
             print(c.terminal_id)
 
 
