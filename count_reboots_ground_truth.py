@@ -54,6 +54,7 @@ def load_and_resolve(jsonl_path: Path) -> dict:
     print(f"Snapshot: {len(reqs_raw)} requests | JSONL: {len(lines)} lines\n")
 
     request_data = {i: copy.deepcopy(r) for i, r in enumerate(reqs_raw) if r is not None}
+    next_idx = len(reqs_raw)
 
     for raw in lines[1:]:
         raw = raw.strip()
@@ -64,10 +65,19 @@ def load_and_resolve(jsonl_path: Path) -> dict:
         except json.JSONDecodeError:
             continue
         kind = obj.get("kind")
-        if kind not in (1, 2):
-            continue
         keys = obj.get("k", [])
         val = obj.get("v")
+
+        # Top-level requests array extension (new requests appended after snapshot)
+        if kind == 2 and keys == ["requests"] and isinstance(val, list):
+            for r in val:
+                if isinstance(r, dict):
+                    request_data[next_idx] = r
+                    next_idx += 1
+            continue
+
+        if kind not in (1, 2):
+            continue
         if len(keys) >= 3 and keys[0] == "requests" and isinstance(keys[1], int):
             req_idx = keys[1]
             field = keys[2]
