@@ -28,6 +28,7 @@ import json
 import copy
 import hashlib
 import os
+import datetime
 from pathlib import Path
 
 COMPLETED_MARKERS = {
@@ -110,6 +111,23 @@ def get_summary_text(req: dict) -> str | None:
         return None
     return summ.get("text", None)
 
+def get_timestamp(req: dict) -> str:
+    """Return ISO timestamp string from request, or '?' if absent."""
+    ts = (req or {}).get("timestamp")
+    if ts is None:
+        # Also try requestStartTime
+        ts = (req or {}).get("requestStartTime")
+    if ts is None:
+        return "?"
+    try:
+        # VS Code stores ms since epoch as integer
+        if isinstance(ts, (int, float)):
+            dt = datetime.datetime.fromtimestamp(ts / 1000, tz=datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        return str(ts)
+    except Exception:
+        return str(ts)
+
 def count_reboots(session_id: str, workspace_hash: str) -> int:
     jsonl_path = find_jsonl(session_id, workspace_hash)
     request_data = load_and_resolve(jsonl_path)
@@ -120,26 +138,27 @@ def count_reboots(session_id: str, workspace_hash: str) -> int:
         marker = get_compaction_marker(req)
         if marker:
             summary = get_summary_text(req)
-            compaction_events.append((idx, marker, summary))
+            ts = get_timestamp(req)
+            compaction_events.append((idx, marker, summary, ts))
 
     print(f"Completed compaction events: {len(compaction_events)}\n")
 
     col_w = 30
-    print(f"{'req_idx':>7}  {'marker':{col_w}}  {'summary_hash':12}  {'REBOOT?':8}  summary_preview")
-    print("-" * 110)
+    print(f"{'req_idx':>7}  {'timestamp':23}  {'marker':{col_w}}  {'summary_hash':12}  {'REBOOT?':8}  summary_preview")
+    print("-" * 135)
 
     true_reboots = []
     prev_hash = None
     no_summary = []
 
-    for idx, marker, summary in compaction_events:
+    for idx, marker, summary, ts in compaction_events:
         if summary is not None:
             h = hashlib.md5(summary.encode()).hexdigest()[:10]
             preview = summary[:60].replace("\n", "↵")
         else:
             h = "NO_SUMMARY"
             preview = "(no result.metadata.summary)"
-            no_summary.append((idx, marker))
+            no_summary.append((idx, marker, ts))
 
         is_new = (h != prev_hash)
         label = "✅ NEW " if is_new else "  dup "
@@ -147,13 +166,14 @@ def count_reboots(session_id: str, workspace_hash: str) -> int:
         if is_new:
             true_reboots.append({
                 "req_idx": idx,
+                "timestamp": ts,
                 "marker": marker,
                 "summary_hash": h,
                 "summary_len": len(summary) if summary else 0,
                 "summary_head": (summary or "")[:200],
             })
 
-        print(f"{idx:>7}  {marker:{col_w}}  {h:12}  {label}  {preview}")
+        print(f"{idx:>7}  {ts:23}  {marker:{col_w}}  {h:12}  {label}  {preview}")
         prev_hash = h
 
     print()
@@ -164,12 +184,16 @@ def count_reboots(session_id: str, workspace_hash: str) -> int:
 
     for i, r in enumerate(true_reboots):
         head = r["summary_head"][:120].replace("\n", "↵") if r["summary_head"] else "(no summary stored)"
-        print(f"  Reboot {i+1:2d}:  req[{r['req_idx']:3d}]  hash={r['summary_hash']}  len={r['summary_len']}  {head}")
+        print(f"  Reboot {i+1:2d}:  req[{r['req_idx']:3d}]  {r['timestamp']:23}  hash={r['summary_hash']}  len={r['summary_len']}  {head}")
 
     if no_summary:
         print("\nRequests WITHOUT result.metadata.summary:")
-        for idx, m in no_summary:
-            print(f"  req[{idx}] {m}")
+        for idx, m, ts in no_summary:
+            print(f"  req[{idx}] {ts}  {m}")
+
+    print()
+    print("To correlate with git: git log --format='%H %ai %s' | head -60")
+    print(f"Session JSONL: {jsonl_path}")
 
     return len(true_reboots)
 
