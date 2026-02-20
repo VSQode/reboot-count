@@ -2,17 +2,23 @@
 """
 count_reboots_ground_truth.py — Reference implementation for reboot counting.
 
-A TRUE REBOOT = a completed compaction event that produced a distinct
-conversation-summary text (result.metadata.summary.text).
+A TRUE REBOOT = a compaction event where:
+  1. A completed-compaction marker appeared in the response, AND
+  2. result.metadata.summary.text is present and non-null, AND
+  3. (implied) the agent subsequently woke into a <conversation-summary> XML block
+
+Cancelled compactions (marker present, summary absent = NO_SUMMARY) are PHANTOM
+reboots. The agent never experienced the summary in-context. They do not increment
+the patch counter. The script skips them in the transition walk entirely.
 
 Algorithm:
   1. Load the session JSONL (ObjectMutationLog format)
   2. Rebuild each request object by applying kind=1/kind=2 patches to snapshot
   3. For each request with a completed-compaction marker in its response:
-     - Extract result.metadata.summary.text
-     - Compute MD5 hash of the summary text
-  4. Walk the list; count TRANSITIONS (new hash != previous hash)
-  5. Report the full list and the true count
+     - If result.metadata.summary.text is absent: record as phantom, skip
+     - Otherwise: compute MD5 hash of the summary text
+  4. Walk the non-phantom list; count TRANSITIONS (new hash != previous hash)
+  5. Report phantoms separately; report the true count
 
 Usage:
   python3 count_reboots_ground_truth.py <SESSION_ID> <WORKSPACE_HASH>
@@ -30,6 +36,12 @@ import hashlib
 import os
 import datetime
 from pathlib import Path
+
+# Force UTF-8 output on Windows (cp1252 default chokes on emoji/arrows)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 COMPLETED_MARKERS = {
     "Summarized conversation history",  # pre-Feb 2026
@@ -162,16 +174,21 @@ def count_reboots(session_id: str, workspace_hash: str) -> int:
     no_summary = []
 
     for idx, marker, summary, ts in compaction_events:
-        if summary is not None:
-            h = hashlib.md5(summary.encode()).hexdigest()[:10]
-            preview = summary[:60].replace("\n", "↵")
-        else:
-            h = "NO_SUMMARY"
-            preview = "(no result.metadata.summary)"
+        if summary is None:
+            # Cancelled compaction: marker written but no summary stored.
+            # The agent never woke into a <conversation-summary> block.
+            # NOT a true reboot — do not update prev_hash.
             no_summary.append((idx, marker, ts))
+            h = "NO_SUMMARY"
+            preview = "(cancelled — no result.metadata.summary)"
+            print(f"{idx:>7}  {ts:23}  {marker:{col_w}}  {h:12}  phantom  {preview}")
+            continue
+
+        h = hashlib.md5(summary.encode()).hexdigest()[:10]
+        preview = summary[:60].replace("\n", "↵")
 
         is_new = (h != prev_hash)
-        label = "✅ NEW " if is_new else "  dup "
+        label = "✅ NEW" if is_new else "   dup"
 
         if is_new:
             true_reboots.append({
@@ -179,8 +196,8 @@ def count_reboots(session_id: str, workspace_hash: str) -> int:
                 "timestamp": ts,
                 "marker": marker,
                 "summary_hash": h,
-                "summary_len": len(summary) if summary else 0,
-                "summary_head": (summary or "")[:200],
+                "summary_len": len(summary),
+                "summary_head": summary[:200],
             })
 
         print(f"{idx:>7}  {ts:23}  {marker:{col_w}}  {h:12}  {label}  {preview}")
